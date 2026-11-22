@@ -1,0 +1,940 @@
+From 0350f3907d5592c70ce0b22f4b3f3284f30424ec Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E2=80=9CHitesh?=
+ <96159804+Hitesh-12345678@users.noreply.github.com>
+Date: Sat, 18 Jul 2026 18:50:38 +0530
+Subject: [PATCH] Improved router for web searching and added conversational
+ history
+
+---
+ backend/app/ingestion/document_ingestor.py   |   2 +-
+ backend/app/memory/__init__.py               |   0
+ backend/app/memory/conversation.json         |  22 ++++
+ backend/app/memory/conversation_memory.py    | 117 +++++++++++++++++++
+ backend/app/retrieval/adaptive_retriever.py  |  72 +++++++++---
+ backend/app/retrieval/answer_generator.py    |  88 +++++++++-----
+ backend/app/retrieval/direct_retriever.py    |  38 +++++-
+ backend/app/retrieval/recursive_retriever.py |  89 ++++++++++++--
+ backend/app/retrieval/retriever.py           |   9 ++
+ backend/app/retrieval/vector_store.py        |  10 ++
+ backend/app/retrieval/web_retriever.py       |  48 +++++++-
+ backend/app/service.py                       |  56 ++++++---
+ backend/app/tools/python/python_agent.py     |   3 +
+ 13 files changed, 479 insertions(+), 75 deletions(-)
+ create mode 100644 backend/app/memory/__init__.py
+ create mode 100644 backend/app/memory/conversation.json
+ create mode 100644 backend/app/memory/conversation_memory.py
+
+diff --git a/backend/app/ingestion/document_ingestor.py b/backend/app/ingestion/document_ingestor.py
+index 18e0a46..f397e45 100644
+--- a/backend/app/ingestion/document_ingestor.py
++++ b/backend/app/ingestion/document_ingestor.py
+@@ -3,7 +3,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
+ 
+ from backend.app.ingestion import loader
+ from backend.app.retrieval.vector_store import VectorStore
+-
++from backend.app.ingestion.loader import PDFLoader
+ 
+ class DocumentIngestor:
+ 
+diff --git a/backend/app/memory/__init__.py b/backend/app/memory/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/backend/app/memory/conversation.json b/backend/app/memory/conversation.json
+new file mode 100644
+index 0000000..05bfb4d
+--- /dev/null
++++ b/backend/app/memory/conversation.json
+@@ -0,0 +1,22 @@
++[
++    {
++        "role": "user",
++        "content": "My name is Hitesh",
++        "timestamp": "2026-07-18T18:46:02.865065"
++    },
++    {
++        "role": "assistant",
++        "content": "Hello Hitesh!\n\nI'm glad to meet you. According to the retrieved context, your name \"Hitesh\" is of Indian origin, derived from the Sanskrit word \"\u0926\u0940\u092a\u0915\" (d\u012bpaka), which translates to \"lamp\" or \"light.\" It's a masculine name with roots in the South Asian tradition.\n\nAs for what you can expect from me, I'm here to help answer any questions you may have. Feel free to ask me anything, and I'll do my best to provide a helpful response.\n\nHow can I assist you today, Hitesh?",
++        "timestamp": "2026-07-18T18:46:02.868347"
++    },
++    {
++        "role": "user",
++        "content": "What is my name?",
++        "timestamp": "2026-07-18T18:46:33.908676"
++    },
++    {
++        "role": "assistant",
++        "content": "Hello Hitesh!\n\nI'm glad to meet you again. According to our previous conversation, your name \"Hitesh\" has Indian origins, derived from the Sanskrit word \"\u0926\u0940\u092a\u0915\" (d\u012bpaka), which translates to \"lamp\" or \"light.\" It's a masculine name with roots in the South Asian tradition.\n\nAs for what you can expect from me today, I'm here to help answer any questions you may have. Feel free to ask me anything, and I'll do my best to provide a helpful response.\n\nHowever, regarding your current question, \"What is my name?\", I must inform you that this information cannot be found in the retrieved context. The retrieved documents seem to be related to a song by Cocomelon and a username search engine called WhatsMyName, but they don't contain any information about your personal identity or name.\n\nIf you're looking for more information about your name's origins or meaning, I'd be happy to try and help you with that. Alternatively, if you have any other questions or topics you'd like to discuss, feel free to ask!",
++        "timestamp": "2026-07-18T18:46:33.910020"
++    }
++]
+\ No newline at end of file
+diff --git a/backend/app/memory/conversation_memory.py b/backend/app/memory/conversation_memory.py
+new file mode 100644
+index 0000000..e56e10c
+--- /dev/null
++++ b/backend/app/memory/conversation_memory.py
+@@ -0,0 +1,117 @@
++import json
++from datetime import datetime
++from pathlib import Path
++
++
++class ConversationMemory:
++    """
++    Stores and manages conversation history.
++
++    Responsibilities:
++    - Load conversation
++    - Save conversation
++    - Add user messages
++    - Add assistant messages
++    - Return recent conversation
++    - Clear conversation
++    """
++
++    def __init__(
++        self,
++        memory_path: str = "backend/app/memory/conversation.json",
++    ):
++
++        self.memory_path = Path(memory_path)
++
++        if not self.memory_path.exists():
++
++            self.memory_path.parent.mkdir(
++                parents=True,
++                exist_ok=True,
++            )
++
++            self.memory_path.write_text(
++                "[]",
++                encoding="utf-8",
++            )
++
++        self.messages = self.load()
++
++    def load(self):
++
++        with open(
++            self.memory_path,
++            "r",
++            encoding="utf-8",
++        ) as file:
++
++            return json.load(file)
++
++    def save(self):
++
++        with open(
++            self.memory_path,
++            "w",
++            encoding="utf-8",
++        ) as file:
++
++            json.dump(
++                self.messages,
++                file,
++                indent=4,
++            )
++
++    def add_user_message(
++        self,
++        message: str,
++    ):
++
++        self.messages.append(
++            {
++                "role": "user",
++                "content": message,
++                "timestamp": datetime.now().isoformat(),
++            }
++        )
++
++        self.save()
++
++    def add_assistant_message(
++        self,
++        message: str,
++    ):
++
++        self.messages.append(
++            {
++                "role": "assistant",
++                "content": message,
++                "timestamp": datetime.now().isoformat(),
++            }
++        )
++
++        self.save()
++
++    def get_recent_history(
++        self,
++        max_messages: int = 10,
++    ) -> str:
++
++        history = self.messages[-max_messages :]
++
++        conversation = []
++
++        for message in history:
++
++            role = message["role"].capitalize()
++
++            conversation.append(
++                f"{role}: {message['content']}"
++            )
++
++        return "\n".join(conversation)
++
++    def clear(self):
++
++        self.messages = []
++
++        self.save()
+\ No newline at end of file
+diff --git a/backend/app/retrieval/adaptive_retriever.py b/backend/app/retrieval/adaptive_retriever.py
+index 0b7658f..6b0f7b5 100644
+--- a/backend/app/retrieval/adaptive_retriever.py
++++ b/backend/app/retrieval/adaptive_retriever.py
+@@ -5,6 +5,7 @@ from backend.app.retrieval.router import QueryRouter
+ from backend.app.retrieval.web_retriever import WebRetriever
+ from backend.app.tools.python.python_agent import PythonAgent
+ 
++SIMILARITY_THRESHOLD = 0.5
+ 
+ class AdaptiveRetriever:
+     """
+@@ -84,15 +85,6 @@ class AdaptiveRetriever:
+                 top_k=top_k,
+             )
+ 
+-        # Web search
+-        if bundle.requires_web:
+-
+-            print("\n🌐 Executing Web Retrieval")
+-
+-            return self.web_retriever.invoke(
+-                question=bundle.original_query,
+-            )
+-
+         # Multi-hop retrieval
+         if bundle.requires_multi_hop:
+ 
+@@ -103,10 +95,62 @@ class AdaptiveRetriever:
+                 top_k=top_k,
+             )
+ 
+-        # Default
+-        print("\n🟢 Executing Direct Retrieval")
++                # Default
++                # ----------------------------------------
++        # Local Retrieval / Web Search
++        # ----------------------------------------
++
++        if bundle.requires_retrieval:
++
++            print("\n🔍 Checking Vector Similarity")
++
++            results = self.direct_retriever.retriever.retrieve_with_score(
++                query=bundle.rewritten_query,
++                top_k=3,
++            )
++
++            if len(results) == 0:
++
++                print("No matching documents found.")
++                print("🌐 Falling back to Web Search")
++
++                return self.web_retriever.invoke(
++                    question=bundle.original_query,
++                )
++
++            best_distance = min(
++                distance
++                for _, distance in results
++            )
++            print("\n================ VECTOR SEARCH ================")
++
++            for i, (_, distance) in enumerate(results, start=1):
++                print(f"Result {i} Distance : {distance:.4f}")
++
++            print(f"\nBest Distance : {best_distance:.4f}")
++            print("===============================================\n")
++
++            print(f"Best Distance : {best_distance:.4f}")
++
++            if best_distance <= SIMILARITY_THRESHOLD:
++
++                print("\n🟢 Executing Direct Retrieval")
++
++                return self.direct_retriever.invoke(
++                    question=bundle.rewritten_query,
++                    top_k=top_k,
++                )
++
++            print("\n🌐 Similarity too low.")
++            print("🌐 Executing Web Retrieval")
++
++            return self.web_retriever.invoke(
++                question=bundle.original_query,
++            )
++
++        print("\n🌐 No uploaded documents.")
++        print("🌐 Executing Web Retrieval")
+ 
+-        return self.direct_retriever.invoke(
+-            question=bundle.rewritten_query,
+-            top_k=top_k,
++        return self.web_retriever.invoke(
++            question=bundle.original_query,
+         )
+\ No newline at end of file
+diff --git a/backend/app/retrieval/answer_generator.py b/backend/app/retrieval/answer_generator.py
+index 333e73c..e920c71 100644
+--- a/backend/app/retrieval/answer_generator.py
++++ b/backend/app/retrieval/answer_generator.py
+@@ -12,40 +12,65 @@ load_dotenv()
+ 
+ class AnswerGenerator:
+     """
+-    Generates answers for individual sub-questions and
+-    synthesizes them into a final answer.
++    Generates answers for individual questions and
++    synthesizes multiple answers into one final response.
+     """
+ 
+     def __init__(self):
+ 
+         self.llm = ChatOllama(
+-            model=os.getenv("OLLAMA_MODEL", "llama3.2:latest"),
+-            temperature=float(os.getenv("TEMPERATURE", 0))
++            model=os.getenv(
++                "OLLAMA_MODEL",
++                "llama3.2:latest",
++            ),
++            temperature=float(
++                os.getenv(
++                    "TEMPERATURE",
++                    0,
++                )
++            ),
+         )
+ 
+-        # -------------------------------
+-        # Prompt for answering sub-questions
+-        # -------------------------------
++        # -------------------------------------------------
++        # Prompt for answering a single question
++        # -------------------------------------------------
+ 
+         self.answer_prompt = ChatPromptTemplate.from_template(
+             """
+-You are a helpful AI assistant answering one sub-question of a larger problem.
++You are a helpful AI assistant.
+ 
+-Current Question:
+-{question}
++Previous Conversation:
++
++{conversation_history}
++
++--------------------------------------------------
++
++Previous Sub-question Answers:
++
++{sub_question_history}
++
++--------------------------------------------------
+ 
+ Retrieved Context:
++
+ {context}
+ 
+-Previous Question Answer Pairs:
+-{history}
++--------------------------------------------------
++
++Current Question:
++
++{question}
+ 
+ Instructions:
+-- Answer ONLY the current question.
+-- Use ONLY the retrieved context.
+-- Use previous answers only if they help resolve references.
+-- If the context is insufficient, clearly state that the answer could not be found.
+-- Keep the answer concise and factual.
++
++- Use the retrieved context as the primary source of truth.
++- Use the previous conversation only when it helps resolve references such as
++  "it", "that", "he", "she", "they", "continue", etc.
++- Use previous sub-question answers only if they help answer the current
++  sub-question.
++- If the retrieved context is insufficient, clearly state that the answer
++  could not be found in the retrieved documents.
++- Keep the answer factual, concise, and well-structured.
+ """
+         )
+ 
+@@ -55,25 +80,30 @@ Instructions:
+             | StrOutputParser()
+         )
+ 
+-        # -------------------------------
+-        # Prompt for synthesizing the final answer
+-        # -------------------------------
++        # -------------------------------------------------
++        # Prompt for synthesizing recursive answers
++        # -------------------------------------------------
+ 
+         self.synthesis_prompt = ChatPromptTemplate.from_template(
+             """
+ You are given answers to multiple sub-questions.
+ 
+ Original Question:
++
+ {question}
+ 
++--------------------------------------------------
++
+ Sub-question Answers:
+-{history}
++
++{sub_question_history}
+ 
+ Instructions:
+-- Combine the answers into one coherent response.
++
++- Combine all answers into one coherent response.
+ - Remove redundant information.
+-- Preserve all important details.
+-- Produce a clear, well-structured final answer.
++- Preserve important details.
++- Produce a clear, natural and well-structured final answer.
+ """
+         )
+ 
+@@ -87,7 +117,8 @@ Instructions:
+         self,
+         question: str,
+         documents: list[Document],
+-        history: str
++        conversation_history: str = "",
++        sub_question_history: str = "",
+     ) -> str:
+ 
+         context = "\n\n".join(
+@@ -99,19 +130,20 @@ Instructions:
+             {
+                 "question": question,
+                 "context": context,
+-                "history": history
++                "conversation_history": conversation_history,
++                "sub_question_history": sub_question_history,
+             }
+         )
+ 
+     def synthesize(
+         self,
+         question: str,
+-        history: str
++        sub_question_history: str,
+     ) -> str:
+ 
+         return self.synthesis_chain.invoke(
+             {
+                 "question": question,
+-                "history": history
++                "sub_question_history": sub_question_history,
+             }
+         )
+\ No newline at end of file
+diff --git a/backend/app/retrieval/direct_retriever.py b/backend/app/retrieval/direct_retriever.py
+index 6679691..5483c1c 100644
+--- a/backend/app/retrieval/direct_retriever.py
++++ b/backend/app/retrieval/direct_retriever.py
+@@ -1,3 +1,4 @@
++from backend.app.memory.conversation_memory import ConversationMemory
+ from backend.app.retrieval.answer_generator import AnswerGenerator
+ from backend.app.retrieval.retriever import Retriever
+ 
+@@ -12,20 +13,22 @@ class DirectRetriever:
+         self,
+         retriever: Retriever,
+         answer_generator: AnswerGenerator,
++        conversation_memory: ConversationMemory,
+     ):
+ 
+         self.retriever = retriever
+         self.answer_generator = answer_generator
++        self.conversation_memory = conversation_memory
+ 
+     def invoke(
+         self,
+         question: str,
+-        top_k: int = 5
++        top_k: int = 5,
+     ) -> str:
+ 
+         documents = self.retriever.retrieve(
+             query=question,
+-            top_k=top_k
++            top_k=top_k,
+         )
+ 
+         print("\n" + "=" * 80)
+@@ -49,10 +52,27 @@ class DirectRetriever:
+ 
+         print("=" * 80)
+ 
++        # ----------------------------------------
++        # Conversation History
++        # ----------------------------------------
++
++        conversation_history = (
++            self.conversation_memory.get_recent_history()
++        )
++
++        print("\n📝 Conversation History")
++        print("-" * 80)
++        print(conversation_history or "No previous conversation.")
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Generate Answer
++        # ----------------------------------------
++
+         answer = self.answer_generator.generate(
+             question=question,
+             documents=documents,
+-            history=""
++            conversation_history=conversation_history,
+         )
+ 
+         print("\n🤖 Generated Answer")
+@@ -60,4 +80,16 @@ class DirectRetriever:
+         print(answer)
+         print("=" * 80)
+ 
++        # ----------------------------------------
++        # Save Conversation
++        # ----------------------------------------
++
++        self.conversation_memory.add_user_message(
++            question
++        )
++
++        self.conversation_memory.add_assistant_message(
++            answer
++        )
++
+         return answer
+\ No newline at end of file
+diff --git a/backend/app/retrieval/recursive_retriever.py b/backend/app/retrieval/recursive_retriever.py
+index e1393d1..0c7fc90 100644
+--- a/backend/app/retrieval/recursive_retriever.py
++++ b/backend/app/retrieval/recursive_retriever.py
+@@ -1,39 +1,80 @@
+-from backend.app.retrieval.decomposer import QuestionDecomposer
++from backend.app.memory.conversation_memory import ConversationMemory
+ from backend.app.retrieval.answer_generator import AnswerGenerator
++from backend.app.retrieval.decomposer import QuestionDecomposer
+ from backend.app.retrieval.retriever import Retriever
+ 
+ 
+ class RecursiveRetriever:
++    """
++    Handles complex multi-hop questions by decomposing them
++    into smaller sub-questions and synthesizing the answers.
++    """
+ 
+     def __init__(
+         self,
+         retriever: Retriever,
+         decomposer: QuestionDecomposer,
+         answer_generator: AnswerGenerator,
++        conversation_memory: ConversationMemory,
+     ):
+ 
+         self.retriever = retriever
+         self.decomposer = decomposer
+         self.answer_generator = answer_generator
++        self.conversation_memory = conversation_memory
+ 
+     def invoke(
+         self,
+         question: str,
+-        top_k: int = 5
++        top_k: int = 5,
+     ) -> str:
+ 
++        # ----------------------------------------
++        # Decompose Question
++        # ----------------------------------------
++
+         sub_questions = self.decomposer.decompose(question)
+ 
++        print("\n" + "=" * 80)
++        print("🧩 Sub Questions")
++        print("=" * 80)
++
++        for index, sub_question in enumerate(sub_questions, start=1):
++            print(f"{index}. {sub_question}")
++
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Conversation History
++        # ----------------------------------------
++
++        conversation_history = (
++            self.conversation_memory.get_recent_history()
++        )
++
++        print("\n📝 Conversation History")
++        print("-" * 80)
++        print(conversation_history or "No previous conversation.")
++        print("=" * 80)
++
+         history = []
+ 
+-        for sub_question in sub_questions:
++        # ----------------------------------------
++        # Answer Each Sub-question
++        # ----------------------------------------
++
++        for index, sub_question in enumerate(sub_questions, start=1):
++
++            print(f"\n🔍 Solving Sub-question {index}")
++            print("-" * 80)
++            print(sub_question)
+ 
+             documents = self.retriever.retrieve(
+                 query=sub_question,
+-                top_k=top_k
++                top_k=top_k,
+             )
+ 
+-            previous_history = "\n\n".join(
++            sub_question_history = "\n\n".join(
+                 f"Question: {item['question']}\n"
+                 f"Answer: {item['answer']}"
+                 for item in history
+@@ -42,23 +83,51 @@ class RecursiveRetriever:
+             answer = self.answer_generator.generate(
+                 question=sub_question,
+                 documents=documents,
+-                history=previous_history
++                conversation_history=conversation_history,
++                sub_question_history=sub_question_history,
+             )
+ 
++            print("\nAnswer:")
++            print(answer)
++
+             history.append(
+                 {
+                     "question": sub_question,
+-                    "answer": answer
++                    "answer": answer,
+                 }
+             )
+ 
++        # ----------------------------------------
++        # Synthesize Final Answer
++        # ----------------------------------------
++
+         final_history = "\n\n".join(
+             f"Question: {item['question']}\n"
+             f"Answer: {item['answer']}"
+             for item in history
+         )
+ 
+-        return self.answer_generator.synthesize(
++        final_answer = self.answer_generator.synthesize(
+             question=question,
+-            history=final_history
+-        )
+\ No newline at end of file
++            sub_question_history=final_history,
++        )
++
++        print("\n" + "=" * 80)
++        print("🤖 Final Synthesized Answer")
++        print("=" * 80)
++        print(final_answer)
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Save Conversation
++        # ----------------------------------------
++
++        self.conversation_memory.add_user_message(
++            question
++        )
++
++        self.conversation_memory.add_assistant_message(
++            final_answer
++        )
++
++        return final_answer
+\ No newline at end of file
+diff --git a/backend/app/retrieval/retriever.py b/backend/app/retrieval/retriever.py
+index ee49e39..ced3bc1 100644
+--- a/backend/app/retrieval/retriever.py
++++ b/backend/app/retrieval/retriever.py
+@@ -21,7 +21,16 @@ class Retriever:
+             query=query,
+             top_k=top_k
+         )
++    def retrieve_with_score(
++        self,
++        query: str,
++        top_k: int = 3,
++    ):
+ 
++        return self.vector_store.similarity_search_with_score(
++            query=query,
++            top_k=top_k,
++        )
+     def retrieve_decomposed(
+         self,
+         query: str,
+diff --git a/backend/app/retrieval/vector_store.py b/backend/app/retrieval/vector_store.py
+index 08483ac..7160d41 100644
+--- a/backend/app/retrieval/vector_store.py
++++ b/backend/app/retrieval/vector_store.py
+@@ -35,6 +35,16 @@ class VectorStore:
+             query,
+             k=top_k
+         )
++    def similarity_search_with_score(
++        self,
++        query: str,
++        top_k: int = 3,
++    ):
++
++        return self.vector_db.similarity_search_with_score(
++            query,
++            k=top_k,
++        )
+ 
+     def count(self):
+ 
+diff --git a/backend/app/retrieval/web_retriever.py b/backend/app/retrieval/web_retriever.py
+index 225428e..acfdae0 100644
+--- a/backend/app/retrieval/web_retriever.py
++++ b/backend/app/retrieval/web_retriever.py
+@@ -5,6 +5,7 @@ from tavily import TavilyClient
+ 
+ from langchain_core.documents import Document
+ 
++from backend.app.memory.conversation_memory import ConversationMemory
+ from backend.app.retrieval.answer_generator import AnswerGenerator
+ 
+ load_dotenv()
+@@ -19,6 +20,7 @@ class WebRetriever:
+     def __init__(
+         self,
+         answer_generator: AnswerGenerator,
++        conversation_memory: ConversationMemory,
+     ):
+ 
+         self.client = TavilyClient(
+@@ -26,6 +28,7 @@ class WebRetriever:
+         )
+ 
+         self.answer_generator = answer_generator
++        self.conversation_memory = conversation_memory
+ 
+     def invoke(
+         self,
+@@ -70,8 +73,47 @@ class WebRetriever:
+                 )
+             )
+ 
+-        return self.answer_generator.generate(
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Conversation History
++        # ----------------------------------------
++
++        conversation_history = (
++            self.conversation_memory.get_recent_history()
++        )
++
++        print("\n📝 Conversation History")
++        print("-" * 80)
++        print(conversation_history or "No previous conversation.")
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Generate Answer
++        # ----------------------------------------
++
++        answer = self.answer_generator.generate(
+             question=question,
+             documents=documents,
+-            history="",
+-        )
+\ No newline at end of file
++            conversation_history=conversation_history,
++            sub_question_history="",
++        )
++
++        print("\n🤖 Generated Answer")
++        print("-" * 80)
++        print(answer)
++        print("=" * 80)
++
++        # ----------------------------------------
++        # Save Conversation
++        # ----------------------------------------
++
++        self.conversation_memory.add_user_message(
++            question
++        )
++
++        self.conversation_memory.add_assistant_message(
++            answer
++        )
++
++        return answer
+\ No newline at end of file
+diff --git a/backend/app/service.py b/backend/app/service.py
+index 64665d4..b68c9e6 100644
+--- a/backend/app/service.py
++++ b/backend/app/service.py
+@@ -1,55 +1,80 @@
+-from backend.app.retrieval.vector_store import VectorStore
+-from backend.app.retrieval.retriever import Retriever
++from backend.app.ingestion.document_ingestor import DocumentIngestor
++from backend.app.memory.conversation_memory import ConversationMemory
+ 
++from backend.app.retrieval.adaptive_retriever import AdaptiveRetriever
+ from backend.app.retrieval.answer_generator import AnswerGenerator
+ from backend.app.retrieval.decomposer import QuestionDecomposer
+-
+ from backend.app.retrieval.direct_retriever import DirectRetriever
+-from backend.app.retrieval.recursive_retriever import RecursiveRetriever
+-
+ from backend.app.retrieval.query_constructor import QueryConstructor
++from backend.app.retrieval.recursive_retriever import RecursiveRetriever
++from backend.app.retrieval.retriever import Retriever
+ from backend.app.retrieval.router import QueryRouter
+-from backend.app.retrieval.adaptive_retriever import AdaptiveRetriever
++from backend.app.retrieval.vector_store import VectorStore
+ from backend.app.retrieval.web_retriever import WebRetriever
+-from backend.app.tools.python.python_context_builder import PythonContextBuilder
++
+ from backend.app.tools.python.python_agent import PythonAgent
+-from backend.app.ingestion.document_ingestor import DocumentIngestor
++from backend.app.tools.python.python_context_builder import (
++    PythonContextBuilder,
++)
++
++# --------------------------------------------------
++# Shared Services (Singletons)
++# --------------------------------------------------
+ 
+ vector_store = VectorStore()
+ 
++conversation_memory = ConversationMemory()
++
+ retriever = Retriever(vector_store)
++
+ document_ingestor = DocumentIngestor(vector_store)
+ 
+ answer_generator = AnswerGenerator()
+ 
+ decomposer = QuestionDecomposer()
+ 
++query_constructor = QueryConstructor()
++
++router = QueryRouter()
++
++python_context_builder = PythonContextBuilder()
++
++# --------------------------------------------------
++# Retrievers
++# --------------------------------------------------
++
+ direct_retriever = DirectRetriever(
+     retriever=retriever,
+     answer_generator=answer_generator,
++    conversation_memory=conversation_memory,
+ )
+ 
+ recursive_retriever = RecursiveRetriever(
+     retriever=retriever,
+     decomposer=decomposer,
+     answer_generator=answer_generator,
++    conversation_memory=conversation_memory,
+ )
+ 
+ web_retriever = WebRetriever(
+-    answer_generator=answer_generator
++    answer_generator=answer_generator,
++    conversation_memory=conversation_memory,
+ )
+ 
+-query_constructor = QueryConstructor()
+-
+-router = QueryRouter()
+-
+-python_context_builder = PythonContextBuilder()
++# --------------------------------------------------
++# Python Agent
++# --------------------------------------------------
+ 
+ python_agent = PythonAgent(
+     retriever=retriever,
+     context_builder=python_context_builder,
++    conversation_memory=conversation_memory,
+ )
+ 
++# --------------------------------------------------
++# Adaptive RAG
++# --------------------------------------------------
++
+ adaptive_retriever = AdaptiveRetriever(
+     query_constructor=query_constructor,
+     router=router,
+@@ -57,5 +82,4 @@ adaptive_retriever = AdaptiveRetriever(
+     recursive_retriever=recursive_retriever,
+     web_retriever=web_retriever,
+     python_agent=python_agent,
+-)
+-
++)
+\ No newline at end of file
+diff --git a/backend/app/tools/python/python_agent.py b/backend/app/tools/python/python_agent.py
+index c7ffb20..2dc1ebc 100644
+--- a/backend/app/tools/python/python_agent.py
++++ b/backend/app/tools/python/python_agent.py
+@@ -13,6 +13,7 @@ from backend.app.tools.python.python_context_builder import (
+     PythonContextBuilder,
+ )
+ from backend.app.models.python_response import PythonResponse
++from backend.app.memory.conversation_memory import ConversationMemory
+ 
+ load_dotenv()
+ 
+@@ -28,10 +29,12 @@ class PythonAgent:
+         self,
+         retriever: Retriever,
+         context_builder: PythonContextBuilder,
++        conversation_memory: ConversationMemory,
+     ):
+ 
+         self.retriever = retriever
+         self.context_builder = context_builder
++        self.conversation_memory = conversation_memory
+ 
+         self.llm = ChatOllama(
+             model=os.getenv(
+-- 
+2.40.0
+
